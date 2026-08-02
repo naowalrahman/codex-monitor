@@ -4,12 +4,23 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MonitorEngine } from "../src/engine/engine.js";
 import { builtinRegistry } from "../src/engine/probes/index.js";
-import { MonitorSpecSchema } from "../src/engine/types.js";
+import { MonitorSpecSchema, type MonitorRecord } from "../src/engine/types.js";
 
 let dir: string;
 let engine: MonitorEngine;
 
 const spec = (raw: unknown) => MonitorSpecSchema.parse(raw);
+
+/** Wait for one monitor to settle, with the timeout every case wants. */
+const settle = (record: MonitorRecord, timeoutMs = 5000) =>
+  engine.waitFor([record.id], "all", { timeoutMs });
+
+/** A monitor whose condition never holds, for testing everything around it. */
+const neverSatisfied = (extra: Record<string, unknown> = {}) =>
+  spec({
+    condition: { type: "command", command: "false", success_when: { exit_code: 0 } },
+    ...extra,
+  });
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "codex-monitor-test-"));
@@ -32,7 +43,7 @@ describe("command monitor", () => {
         },
       }),
     );
-    const result = await engine.waitFor([record.id], "all", { timeoutMs: 5000 });
+    const result = await settle(record);
     expect(result.outcome).toBe("settled");
     expect(result.monitors[0].state).toBe("satisfied");
     expect(result.monitors[0].resolution).toContain("COMPLETED");
@@ -49,7 +60,7 @@ describe("command monitor", () => {
         },
       }),
     );
-    const result = await engine.waitFor([record.id], "all", { timeoutMs: 5000 });
+    const result = await settle(record);
     expect(result.monitors[0].state).toBe("failed");
   });
 
@@ -66,7 +77,7 @@ describe("command monitor", () => {
       }),
     );
     setTimeout(() => writeFileSync(flag, "ready\n"), 200);
-    const result = await engine.waitFor([record.id], "all", { timeoutMs: 5000 });
+    const result = await settle(record);
     expect(result.monitors[0].state).toBe("satisfied");
     expect(result.monitors[0].attempts).toBeGreaterThan(1);
   });
@@ -75,12 +86,9 @@ describe("command monitor", () => {
 describe("wait semantics", () => {
   it("returns wait_timeout while monitors keep running", async () => {
     const record = engine.create(
-      spec({
-        condition: { type: "command", command: "false", success_when: { exit_code: 0 } },
-        poll: { interval_seconds: 0.05 },
-      }),
+      neverSatisfied({ poll: { interval_seconds: 0.05 } }),
     );
-    const result = await engine.waitFor([record.id], "all", { timeoutMs: 100 });
+    const result = await settle(record, 100);
     expect(result.outcome).toBe("wait_timeout");
     expect(engine.get(record.id)!.state).toBe("active");
   });
@@ -90,10 +98,7 @@ describe("wait semantics", () => {
       spec({ condition: { type: "command", command: "true", success_when: { exit_code: 0 } } }),
     );
     const slow = engine.create(
-      spec({
-        condition: { type: "command", command: "false", success_when: { exit_code: 0 } },
-        poll: { interval_seconds: 5 },
-      }),
+      neverSatisfied({ poll: { interval_seconds: 5 } }),
     );
     const result = await engine.waitFor([fast.id, slow.id], "any", { timeoutMs: 5000 });
     expect(result.outcome).toBe("settled");
@@ -104,13 +109,9 @@ describe("wait semantics", () => {
 
   it("monitor timeout produces state 'timeout'", async () => {
     const record = engine.create(
-      spec({
-        condition: { type: "command", command: "false", success_when: { exit_code: 0 } },
-        poll: { interval_seconds: 0.05 },
-        timeout_seconds: 0.3,
-      }),
+      neverSatisfied({ poll: { interval_seconds: 0.05 }, timeout_seconds: 0.3 }),
     );
-    const result = await engine.waitFor([record.id], "all", { timeoutMs: 5000 });
+    const result = await settle(record);
     expect(result.monitors[0].state).toBe("timeout");
   });
 });
@@ -125,7 +126,7 @@ describe("log monitor", () => {
       }),
     );
     setTimeout(() => appendFileSync(logPath, "epoch 42 complete\n"), 150);
-    const result = await engine.waitFor([record.id], "all", { timeoutMs: 5000 });
+    const result = await settle(record);
     expect(result.monitors[0].state).toBe("satisfied");
     expect(result.monitors[0].resolution).toContain("epoch 42 complete");
   });
@@ -136,11 +137,11 @@ describe("log monitor", () => {
     const record = engine.create(
       spec({ condition: { type: "log", path: logPath, pattern: "DONE", from: "end" } }),
     );
-    const early = await engine.waitFor([record.id], "all", { timeoutMs: 300 });
+    const early = await settle(record, 300);
     expect(early.outcome).toBe("wait_timeout");
 
     appendFileSync(logPath, "new run: DONE\n");
-    const result = await engine.waitFor([record.id], "all", { timeoutMs: 5000 });
+    const result = await settle(record);
     expect(result.monitors[0].state).toBe("satisfied");
   });
 
@@ -158,7 +159,7 @@ describe("log monitor", () => {
       }),
     );
     setTimeout(() => appendFileSync(logPath, "Traceback (most recent call last)\n"), 150);
-    const result = await engine.waitFor([record.id], "all", { timeoutMs: 5000 });
+    const result = await settle(record);
     expect(result.monitors[0].state).toBe("failed");
   });
 });
@@ -170,7 +171,7 @@ describe("file monitor", () => {
       spec({ condition: { type: "file", path: target, event: "exists" } }),
     );
     setTimeout(() => writeFileSync(target, "data"), 150);
-    const result = await engine.waitFor([record.id], "all", { timeoutMs: 5000 });
+    const result = await settle(record);
     expect(result.monitors[0].state).toBe("satisfied");
   });
 
@@ -181,7 +182,38 @@ describe("file monitor", () => {
       spec({ condition: { type: "file", path: target, event: "changed" } }),
     );
     setTimeout(() => writeFileSync(target, "v2 with more content"), 150);
-    const result = await engine.waitFor([record.id], "all", { timeoutMs: 5000 });
+    const result = await settle(record);
+    expect(result.monitors[0].state).toBe("satisfied");
+  });
+
+  it("event 'stable' waits for writes to stop before settling", async () => {
+    const target = join(dir, "download.part");
+    writeFileSync(target, "chunk");
+    const record = engine.create(
+      spec({ condition: { type: "file", path: target, event: "stable", stable_seconds: 0.4 } }),
+    );
+    // Keep appending past the stability window: it must not settle early.
+    const writes = [100, 200, 300].map((at) =>
+      setTimeout(() => appendFileSync(target, " more"), at),
+    );
+    const early = await settle(record, 500);
+    expect(early.outcome).toBe("wait_timeout");
+    writes.forEach(clearTimeout);
+
+    // Writes have stopped, so it settles once the window elapses.
+    const result = await settle(record);
+    expect(result.monitors[0].state).toBe("satisfied");
+    expect(result.monitors[0].resolution).toContain("unchanged");
+  });
+
+  it("event 'deleted' settles when the file disappears", async () => {
+    const target = join(dir, "lockfile");
+    writeFileSync(target, "held");
+    const record = engine.create(
+      spec({ condition: { type: "file", path: target, event: "deleted" } }),
+    );
+    setTimeout(() => rmSync(target), 150);
+    const result = await settle(record);
     expect(result.monitors[0].state).toBe("satisfied");
   });
 });
@@ -220,14 +252,11 @@ describe("custom probes", () => {
 describe("cancel", () => {
   it("settles an active monitor as cancelled", async () => {
     const record = engine.create(
-      spec({
-        condition: { type: "command", command: "false", success_when: { exit_code: 0 } },
-        poll: { interval_seconds: 5 },
-      }),
+      neverSatisfied({ poll: { interval_seconds: 5 } }),
     );
     engine.cancel(record.id, "user changed plans");
     expect(engine.get(record.id)!.state).toBe("cancelled");
-    const result = await engine.waitFor([record.id], "all", { timeoutMs: 1000 });
+    const result = await settle(record, 1000);
     expect(result.outcome).toBe("settled");
   });
 });
