@@ -28,23 +28,27 @@ MonitorEngine ─────────── lifecycle, scheduling, wait sema
                │
                ├── ProbeRegistry ── built-ins: command, file, log (engine/probes/*)
                │                    + custom probes from ~/.codex-monitor/probes/*.mjs
-               └── EventEmitter "settled" ──► pending waitFor() promises
+               └── waiter index (monitor id ──► waiters) ──► waitFor() promises
 ```
 
 The engine knows nothing about MCP; the server knows nothing about probes. Both are independently testable (the test suite drives the engine directly), and the engine could be embedded in another host without change.
 
 ## The monitor lifecycle
 
-A monitor is `spec` (condition + poll policy + timeout) plus `record` (state, attempts, evidence, history). `active` is the only non-terminal state; `settle()` moves a monitor to `satisfied`, `failed`, `timeout`, or `cancelled` exactly once, tears down its runtime (timers, watchers), and emits `settled` to wake any waiters. Settled records stay readable via `monitor_status` for the rest of the session.
+A monitor is `spec` (condition + poll policy + timeout) plus `record` (state, attempts, evidence). `active` is the only non-terminal state; `settle()` moves a monitor to `satisfied`, `failed`, `timeout`, or `cancelled` exactly once, tears down its runtime (timers, watchers), and wakes any waiters registered on it. Settled records stay readable via `monitor_status` for the rest of the session.
 
 `failed` is a first-class outcome, not an error: distinguishing "the job finished" from "the job crashed" at the *condition* level (`failure_when`, `failure_pattern`) means the agent wakes up already knowing which happened, with evidence attached, instead of waking on a generic change and re-investigating.
 
 ## The evaluation model
 
-Probes come in two shapes, and the engine treats them uniformly:
+A probe exposes two capabilities, and may provide either or both:
 
-- **Event-driven** (`start`/`stop`): the probe subscribes to a push source — `fs.watch` for `file` and `log` — and emits outcomes when the world changes. A coarse 1s safety timer backs the watcher, because `fs.watch` is best-effort on network mounts and misses atomic-rename writes on some platforms. Latency is milliseconds; steady-state cost is ~zero.
-- **Probed** (`check`): the engine schedules evaluations at `interval · factor^n`, capped at `max_interval`, with ±10% jitter (so fifty monitors created together don't thundering-herd a login node). Probe errors — network blips, a `squeue` that fails once — are recorded as `pending`, never as failure; the monitor's own deadline is the backstop for a probe that errors forever.
+- **`check()`** — evaluate once. The engine schedules these at `interval · factor^n`, capped at `max_interval`, with ±10% jitter (so fifty monitors created together don't thundering-herd a login node). Probe errors — network blips, a `squeue` that fails once — are recorded as `pending`, never as failure; the monitor's own deadline is the backstop for a probe that errors forever.
+- **`start`/`stop`** — subscribe to a push source and emit outcomes as they arrive.
+
+Crucially there is exactly **one** scheduler. `file` and `log` provide both capabilities over the same evaluation function: `fs.watch` supplies millisecond latency, and the engine's scheduled `check()` is the safety net, because `fs.watch` is best-effort on network mounts and misses atomic-rename writes on some platforms. Neither probe runs a poll loop of its own, so the `poll` policy is tunable per monitor for every condition type, and improving the scheduler improves all of them at once. Probes declare a `defaultPoll` when their condition implies a cadence — `file` with `event: "stable"` derives its interval from `stable_seconds`, because nothing pushes a notification when a file *stops* changing, so only the check can observe it.
+
+Concurrent evaluations are coalesced onto one in-flight promise (a watcher typically fires several times per write, and a scheduled check can land on top of that), so bursty sources cost one stat/read pass rather than many.
 
 Either way, evaluation lives entirely in the plugin process. The model's only verbs are *create*, *wait*, *status*, *cancel*.
 
@@ -74,7 +78,7 @@ Consequently `~/.codex-monitor/` holds only configuration (the custom probes dir
 `waitFor(ids, mode, timeout)` resolves when the id set settles (`all`) or when the first member settles (`any`), returning snapshots of every requested monitor with its evidence. Design points:
 
 - A wait timeout is a **normal outcome**, not an error, and it does not disturb the monitors.
-- Waiters are pure observers on the `settled` event — any number of waits, over overlapping sets, concurrently.
+- Waiters are pure observers, indexed by the monitor ids they care about — any number of waits, over overlapping sets, concurrently. Settling a monitor notifies only the waiters registered on *that* monitor, so the cost does not grow with the number of unrelated waits in flight.
 - `mode: "any"` over several monitors is the composition primitive ("wake me when the job finishes *or* the error log matches"), which is why boolean condition algebra hasn't been needed in the core.
 - The MCP request's abort signal cancels the wait (not the monitors).
 
