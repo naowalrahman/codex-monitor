@@ -148,7 +148,10 @@ export const MonitorSpecSchema = z.object({
   condition: ConditionSchema,
   poll: PollPolicySchema.partial()
     .optional()
-    .describe("Override the probe schedule (ignored by purely event-driven conditions)."),
+    .describe(
+      "Override the probe schedule. Event-driven conditions (file, log) still react immediately " +
+        "via filesystem events; this tunes the periodic safety check behind them.",
+    ),
   timeout_seconds: z
     .number()
     .positive()
@@ -180,18 +183,12 @@ export interface ProbeOutcome {
   detail?: string;
 }
 
-export interface HistoryEntry {
-  at: string; // ISO timestamp
-  note: string;
-}
-
 /** The in-memory record for one monitor (session-scoped). */
 export interface MonitorRecord {
   id: string;
   spec: MonitorSpec;
   state: MonitorState;
   createdAt: string;
-  updatedAt: string;
   /** Absolute deadline for the monitor's own timeout. */
   deadlineAt: string;
   resolvedAt?: string;
@@ -200,7 +197,6 @@ export interface MonitorRecord {
   /** Number of probe evaluations performed. */
   attempts: number;
   lastResult?: { at: string; status: ProbeOutcome["status"]; detail?: string };
-  history: HistoryEntry[];
 }
 
 /** Compact view returned to the agent. */

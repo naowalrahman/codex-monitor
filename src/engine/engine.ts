@@ -16,7 +16,6 @@
  * sessions, zero shared state) at the cost of monitors not outliving their
  * session.
  */
-import { EventEmitter } from "node:events";
 import { randomBytes } from "node:crypto";
 import type { ProbeRegistry } from "./registry.js";
 import type { Probe } from "./probes/probe.js";
@@ -32,7 +31,6 @@ import {
 } from "./types.js";
 
 const DEFAULT_POLL: PollPolicy = { interval_seconds: 5, max_interval_seconds: 60, backoff_factor: 1.5 };
-const HISTORY_LIMIT = 50;
 
 interface Runtime {
   probe: Probe;
@@ -40,7 +38,8 @@ interface Runtime {
   checkTimer?: ReturnType<typeof setTimeout>;
   deadlineTimer?: ReturnType<typeof setTimeout>;
   checking: boolean;
-  consecutiveChecks: number;
+  /** Scheduled checks so far; drives the backoff exponent. */
+  checks: number;
 }
 
 export type WaitMode = "all" | "any";
@@ -50,18 +49,37 @@ export interface WaitResult {
   monitors: MonitorSnapshot[];
 }
 
-export class MonitorEngine extends EventEmitter {
+/**
+ * One pending `waitFor` call. Holds only the fields it needs rather than
+ * capturing the surrounding scope, and is indexed per-monitor so settling a
+ * monitor costs O(waiters on that monitor) instead of a scan of every waiter.
+ */
+class Waiter {
+  remaining: number;
+  constructor(
+    readonly targets: string[],
+    readonly mode: WaitMode,
+    readonly settle: (outcome: WaitResult["outcome"]) => void,
+  ) {
+    this.remaining = targets.length;
+  }
+
+  /** Returns true when this settle completes the wait. */
+  satisfiedBy(): boolean {
+    this.remaining -= 1;
+    return this.mode === "any" || this.remaining <= 0;
+  }
+}
+
+export class MonitorEngine {
   private records = new Map<string, MonitorRecord>();
   private runtimes = new Map<string, Runtime>();
-  private closed = false;
+  private waiters = new Map<string, Set<Waiter>>();
 
   constructor(
     private registry: ProbeRegistry,
     private log: (msg: string) => void = () => {},
-  ) {
-    super();
-    this.setMaxListeners(100);
-  }
+  ) {}
 
   create(spec: MonitorSpec): MonitorRecord {
     const now = new Date();
@@ -70,12 +88,9 @@ export class MonitorEngine extends EventEmitter {
       spec,
       state: "active",
       createdAt: now.toISOString(),
-      updatedAt: now.toISOString(),
       deadlineAt: new Date(now.getTime() + spec.timeout_seconds * 1000).toISOString(),
       attempts: 0,
-      history: [],
     };
-    this.note(record, `created (${spec.condition.type})`);
     this.records.set(record.id, record);
     try {
       this.arm(record); // throws on unknown condition type / bad custom condition
@@ -90,12 +105,20 @@ export class MonitorEngine extends EventEmitter {
     return this.records.get(id);
   }
 
+  /** Look up a monitor, failing with the message the agent should see. */
+  getOrThrow(id: string): MonitorRecord {
+    const record = this.records.get(id);
+    if (!record) throw new Error(`unknown monitor id: ${id}`);
+    return record;
+  }
+
+  /** Monitors in creation order (Map preserves insertion order). */
   list(): MonitorRecord[] {
-    return [...this.records.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    return [...this.records.values()];
   }
 
   cancel(id: string, reason = "cancelled by request"): MonitorRecord {
-    const record = this.mustGet(id);
+    const record = this.getOrThrow(id);
     if (record.state === "active") this.settle(id, "cancelled", reason);
     return record;
   }
@@ -110,45 +133,54 @@ export class MonitorEngine extends EventEmitter {
     mode: WaitMode,
     opts: { timeoutMs: number; signal?: AbortSignal },
   ): Promise<WaitResult> {
-    const targets = ids.map((id) => this.mustGet(id).id);
-    const snapshots = () => targets.map((id) => toSnapshot(this.mustGet(id)));
-    const done = () => {
-      const settled = targets.filter((id) => TERMINAL_STATES.has(this.mustGet(id).state));
-      return mode === "any" ? settled.length > 0 : settled.length === targets.length;
-    };
+    const snapshots = () => ids.map((id) => toSnapshot(this.getOrThrow(id)));
+    // Deduplicated for bookkeeping — a monitor listed twice must not be
+    // counted twice — while the result still mirrors the caller's list.
+    const targets = [...new Set(ids)].map((id) => this.getOrThrow(id).id);
 
-    if (done()) return Promise.resolve({ outcome: "settled", monitors: snapshots() });
+    const settledCount = targets.filter((id) =>
+      TERMINAL_STATES.has(this.getOrThrow(id).state),
+    ).length;
+    const done = mode === "any" ? settledCount > 0 : settledCount === targets.length;
+    if (done) return Promise.resolve({ outcome: "settled", monitors: snapshots() });
 
     return new Promise<WaitResult>((resolve) => {
-      const finish = (outcome: WaitResult["outcome"]) => {
-        this.off("settled", onSettled);
+      const waiter = new Waiter(targets, mode, (outcome) => {
         clearTimeout(timer);
         opts.signal?.removeEventListener("abort", onAbort);
+        this.unregisterWaiter(waiter);
         resolve({ outcome, monitors: snapshots() });
-      };
-      const onSettled = (record: MonitorRecord) => {
-        if (targets.includes(record.id) && done()) finish("settled");
-      };
-      const onAbort = () => finish("aborted");
-      const timer = setTimeout(() => finish("wait_timeout"), opts.timeoutMs);
-      this.on("settled", onSettled);
+      });
+      // Monitors that settled before this call still count toward 'all'.
+      waiter.remaining -= settledCount;
+      const onAbort = () => waiter.settle("aborted");
+      const timer = setTimeout(() => waiter.settle("wait_timeout"), opts.timeoutMs);
+
+      for (const id of targets) {
+        if (TERMINAL_STATES.has(this.getOrThrow(id).state)) continue;
+        let set = this.waiters.get(id);
+        if (!set) this.waiters.set(id, (set = new Set()));
+        set.add(waiter);
+      }
       opts.signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
   close(): void {
-    this.closed = true;
-    for (const id of this.runtimes.keys()) this.disarm(id);
+    for (const id of [...this.runtimes.keys()]) this.disarm(id);
   }
 
   // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
 
-  private mustGet(id: string): MonitorRecord {
-    const record = this.records.get(id);
-    if (!record) throw new Error(`unknown monitor id: ${id}`);
-    return record;
+  private unregisterWaiter(waiter: Waiter): void {
+    for (const id of waiter.targets) {
+      const set = this.waiters.get(id);
+      if (!set) continue;
+      set.delete(waiter);
+      if (set.size === 0) this.waiters.delete(id);
+    }
   }
 
   private arm(record: MonitorRecord): void {
@@ -158,7 +190,7 @@ export class MonitorEngine extends EventEmitter {
       ...probe.defaultPoll,
       ...record.spec.poll,
     };
-    const rt: Runtime = { probe, poll, checking: false, consecutiveChecks: 0 };
+    const rt: Runtime = { probe, poll, checking: false, checks: 0 };
     this.runtimes.set(record.id, rt);
 
     rt.deadlineTimer = setTimeout(
@@ -196,7 +228,7 @@ export class MonitorEngine extends EventEmitter {
 
   private scheduleCheck(id: string, delayMs: number): void {
     const rt = this.runtimes.get(id);
-    if (!rt || this.closed) return;
+    if (!rt) return; // disarmed: settled, or the engine was closed
     rt.checkTimer = setTimeout(() => void this.runCheck(id), delayMs);
   }
 
@@ -214,7 +246,7 @@ export class MonitorEngine extends EventEmitter {
       outcome = { status: "pending", detail: `probe error: ${(err as Error).message}` };
     }
     rt.checking = false;
-    rt.consecutiveChecks += 1;
+    rt.checks += 1;
     this.applyOutcome(id, outcome);
 
     const stillActive = this.records.get(id)?.state === "active";
@@ -222,7 +254,7 @@ export class MonitorEngine extends EventEmitter {
       const { interval_seconds, max_interval_seconds, backoff_factor } = rt.poll;
       const base = Math.min(
         max_interval_seconds,
-        interval_seconds * Math.pow(backoff_factor, rt.consecutiveChecks - 1),
+        interval_seconds * Math.pow(backoff_factor, rt.checks - 1),
       );
       const jitter = 1 + (Math.random() - 0.5) * 0.2; // ±10%
       this.scheduleCheck(id, base * 1000 * jitter);
@@ -234,7 +266,6 @@ export class MonitorEngine extends EventEmitter {
     if (!record || record.state !== "active") return;
     record.attempts += 1;
     record.lastResult = { at: new Date().toISOString(), status: outcome.status, detail: outcome.detail };
-    record.updatedAt = record.lastResult.at;
     if (outcome.status === "satisfied" || outcome.status === "failed") {
       this.settle(id, outcome.status, outcome.detail ?? outcome.status);
     }
@@ -248,16 +279,13 @@ export class MonitorEngine extends EventEmitter {
     record.state = state;
     record.resolution = resolution;
     record.resolvedAt = new Date().toISOString();
-    record.updatedAt = record.resolvedAt;
-    this.note(record, `${state}: ${resolution}`);
-    this.emit("settled", record);
     this.log(`monitor ${id} (${record.spec.name ?? record.spec.condition.type}) -> ${state}`);
-  }
 
-  private note(record: MonitorRecord, note: string): void {
-    record.history.push({ at: new Date().toISOString(), note });
-    if (record.history.length > HISTORY_LIMIT) {
-      record.history.splice(0, record.history.length - HISTORY_LIMIT);
+    const waiting = this.waiters.get(id);
+    if (!waiting) return;
+    this.waiters.delete(id);
+    for (const waiter of waiting) {
+      if (waiter.satisfiedBy()) waiter.settle("settled");
     }
   }
 }
