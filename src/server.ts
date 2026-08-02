@@ -14,15 +14,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { MonitorEngine, type WaitMode } from "./engine/engine.js";
+import { MonitorEngine, type WaitMode, type WaitResult } from "./engine/engine.js";
 import { builtinRegistry } from "./engine/probes/index.js";
 import { defaultHome, loadCustomProbes } from "./engine/registry.js";
 import { MonitorSpecSchema, toSnapshot, type MonitorRecord } from "./engine/types.js";
-import { createRequire } from "node:module";
+import { VERSION } from "./version.js";
 import { join } from "node:path";
-
-const require = createRequire(import.meta.url);
-const VERSION: string = require("../package.json").version;
 
 const HEARTBEAT_MS = 15_000;
 
@@ -42,12 +39,60 @@ function creationView(record: MonitorRecord) {
   };
 }
 
+/** The subset of the MCP request context the blocking tools need. */
+interface RequestExtra {
+  signal: AbortSignal;
+  _meta?: { progressToken?: string | number };
+  sendNotification: (notification: {
+    method: "notifications/progress";
+    params: { progressToken: string | number; progress: number; message: string };
+  }) => Promise<void>;
+}
+
+/**
+ * Block on `engine.waitFor`, emitting progress notifications while we do.
+ * Clients that honor progress use them to keep a long tool call from timing
+ * out, which is what makes an hours-long pause survivable; both blocking
+ * tools share this so the keepalive behavior can only be defined once.
+ */
+async function waitWithHeartbeat(
+  engine: MonitorEngine,
+  ids: string[],
+  mode: WaitMode,
+  timeoutMs: number,
+  extra: RequestExtra,
+): Promise<WaitResult> {
+  const progressToken = extra._meta?.progressToken;
+  let beats = 0;
+  const heartbeat =
+    progressToken === undefined
+      ? undefined
+      : setInterval(() => {
+          beats += 1;
+          void extra
+            .sendNotification({
+              method: "notifications/progress",
+              params: {
+                progressToken,
+                progress: beats,
+                message: `still waiting on ${ids.join(", ")}`,
+              },
+            })
+            .catch(() => {});
+        }, HEARTBEAT_MS);
+
+  try {
+    return await engine.waitFor(ids, mode, { timeoutMs, signal: extra.signal });
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+  }
+}
+
 export async function runServer(home = defaultHome()): Promise<void> {
   const registry = builtinRegistry();
   await loadCustomProbes(registry, join(home, "probes"), log);
 
   const engine = new MonitorEngine(registry, log);
-
   const server = new McpServer({ name: "codex-monitor", version: VERSION });
 
   server.registerTool(
@@ -55,18 +100,14 @@ export async function runServer(home = defaultHome()): Promise<void> {
     {
       title: "Create monitor",
       description:
-        "Create a background monitor that watches for a condition (command output predicates, " +
-        "log pattern, file event, or any installed custom probe type) and settles when it " +
-        "becomes true. Evaluation " +
-        "happens inside the plugin — never write your own sleep/poll loop. Returns a monitor id; " +
-        "pass it to monitor_wait to pause until the condition holds. Use this for anything " +
-        "long-running: cluster jobs, builds, deploys, downloads, servers coming up.",
+        "Create a background monitor that watches for a condition and settles when it becomes " +
+        "true. Evaluation happens inside the plugin — never write your own sleep/poll loop. " +
+        "Returns a monitor id; pass it to monitor_wait to pause until the condition holds. Use " +
+        "this for anything long-running: cluster jobs, builds, deploys, downloads, servers " +
+        `coming up. Installed condition types: ${registry.types().join(", ")}.`,
       inputSchema: MonitorSpecSchema.shape,
     },
-    async (args) => {
-      const spec = MonitorSpecSchema.parse(args);
-      return jsonResult(creationView(engine.create(spec)));
-    },
+    async (args) => jsonResult(creationView(engine.create(MonitorSpecSchema.parse(args)))),
   );
 
   server.registerTool(
@@ -89,36 +130,16 @@ export async function runServer(home = defaultHome()): Promise<void> {
           .describe("Give up waiting (not the monitors) after this long."),
       },
     },
-    async (args, extra) => {
-      const mode = (args.mode ?? "all") as WaitMode;
-      const timeoutMs = (args.wait_timeout_seconds ?? 1800) * 1000;
-
-      // Keep long waits alive for clients that honor progress notifications.
-      const progressToken = extra._meta?.progressToken;
-      let beats = 0;
-      const heartbeat = progressToken
-        ? setInterval(() => {
-            beats += 1;
-            void extra
-              .sendNotification({
-                method: "notifications/progress",
-                params: {
-                  progressToken,
-                  progress: beats,
-                  message: `still waiting on ${args.ids.join(", ")}`,
-                },
-              })
-              .catch(() => {});
-          }, HEARTBEAT_MS)
-        : undefined;
-
-      try {
-        const result = await engine.waitFor(args.ids, mode, { timeoutMs, signal: extra.signal });
-        return jsonResult(result);
-      } finally {
-        if (heartbeat) clearInterval(heartbeat);
-      }
-    },
+    async (args, extra) =>
+      jsonResult(
+        await waitWithHeartbeat(
+          engine,
+          args.ids,
+          args.mode,
+          args.wait_timeout_seconds * 1000,
+          extra,
+        ),
+      ),
   );
 
   server.registerTool(
@@ -136,32 +157,10 @@ export async function runServer(home = defaultHome()): Promise<void> {
     },
     async (args, extra) => {
       const { wait_timeout_seconds, ...specArgs } = args;
-      const spec = MonitorSpecSchema.parse(specArgs);
-      const record = engine.create(spec);
-
-      const progressToken = extra._meta?.progressToken;
-      let beats = 0;
-      const heartbeat = progressToken
-        ? setInterval(() => {
-            beats += 1;
-            void extra
-              .sendNotification({
-                method: "notifications/progress",
-                params: { progressToken, progress: beats, message: `waiting on ${record.id}` },
-              })
-              .catch(() => {});
-          }, HEARTBEAT_MS)
-        : undefined;
-
-      try {
-        const result = await engine.waitFor([record.id], "all", {
-          timeoutMs: (wait_timeout_seconds ?? 1800) * 1000,
-          signal: extra.signal,
-        });
-        return jsonResult(result);
-      } finally {
-        if (heartbeat) clearInterval(heartbeat);
-      }
+      const record = engine.create(MonitorSpecSchema.parse(specArgs));
+      return jsonResult(
+        await waitWithHeartbeat(engine, [record.id], "all", wait_timeout_seconds * 1000, extra),
+      );
     },
   );
 
@@ -177,13 +176,7 @@ export async function runServer(home = defaultHome()): Promise<void> {
       },
     },
     async (args) => {
-      const records = args.ids
-        ? args.ids.map((id) => {
-            const r = engine.get(id);
-            if (!r) throw new Error(`unknown monitor id: ${id}`);
-            return r;
-          })
-        : engine.list();
+      const records = args.ids ? args.ids.map((id) => engine.getOrThrow(id)) : engine.list();
       return jsonResult({ monitors: records.map(toSnapshot) });
     },
   );
@@ -198,10 +191,7 @@ export async function runServer(home = defaultHome()): Promise<void> {
         reason: z.string().optional(),
       },
     },
-    async (args) => {
-      const record = engine.cancel(args.id, args.reason ?? "cancelled by request");
-      return jsonResult({ monitor: toSnapshot(record) });
-    },
+    async (args) => jsonResult({ monitor: toSnapshot(engine.cancel(args.id, args.reason)) }),
   );
 
   const shutdown = () => {

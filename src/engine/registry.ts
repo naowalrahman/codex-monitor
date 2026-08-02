@@ -57,10 +57,20 @@ export async function loadCustomProbes(
   } catch {
     return; // no custom probes dir — fine
   }
-  for (const entry of entries) {
-    if (!/\.(mjs|js)$/.test(entry)) continue;
+  // Imported concurrently (this is on the startup path, before the server
+  // can answer anything) but registered in directory order, so which probe
+  // wins a duplicate type name does not depend on module load timing.
+  const files = entries.filter((e) => /\.(mjs|js)$/.test(e)).sort();
+  const modules = await Promise.all(
+    files.map((entry) =>
+      import(pathToFileURL(join(dir, entry)).href).catch((err: Error) => err),
+    ),
+  );
+
+  for (const [i, mod] of modules.entries()) {
+    const entry = files[i];
     try {
-      const mod = await import(pathToFileURL(join(dir, entry)).href);
+      if (mod instanceof Error) throw mod;
       const defs = Array.isArray(mod.default) ? mod.default : [mod.default];
       for (const def of defs) {
         if (!def?.type || typeof def.create !== "function") {

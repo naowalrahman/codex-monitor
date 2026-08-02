@@ -6,12 +6,9 @@
  *   codex-monitor mcp        same, explicit
  *   codex-monitor home       print the config directory (custom probes live in <home>/probes)
  */
-import { createRequire } from "node:module";
 import { runServer } from "./server.js";
 import { defaultHome } from "./engine/registry.js";
-
-const require = createRequire(import.meta.url);
-const VERSION: string = require("../package.json").version;
+import { VERSION } from "./version.js";
 
 const arg = process.argv[2];
 switch (arg) {
