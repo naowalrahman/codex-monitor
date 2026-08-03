@@ -18,8 +18,10 @@ Agents watching long-running work (cluster jobs, builds, deploys, training runs)
 ## Install
 
 ```bash
-npm install -g codex-monitor
+npm install -g @naowalrahman/codex-monitor
 ```
+
+The package is scoped, but the binary it installs is plain `codex-monitor`.
 
 Then register it in `~/.codex/config.toml`:
 
@@ -31,7 +33,7 @@ tool_timeout_sec = 86400
 startup_timeout_sec = 20
 ```
 
-(Or skip the global install and use `command = "npx"`, `args = ["-y", "codex-monitor"]`.)
+(Or skip the global install and use `command = "npx"`, `args = ["-y", "@naowalrahman/codex-monitor"]`.)
 
 Finally, teach the agent to reach for monitors by adding this to your `AGENTS.md`:
 

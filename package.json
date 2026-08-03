@@ -1,9 +1,20 @@
 {
-  "name": "codex-monitor",
+  "name": "@naowalrahman/codex-monitor",
   "version": "0.1.0",
   "description": "Event-driven monitors for the Codex CLI: pause the agent until an arbitrary condition becomes true. No LLM polling loops.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/naowalrahman/codex-monitor.git"
+  },
+  "homepage": "https://github.com/naowalrahman/codex-monitor#readme",
+  "bugs": {
+    "url": "https://github.com/naowalrahman/codex-monitor/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "codex-monitor": "dist/index.js"
   },
