@@ -13,7 +13,7 @@
  * The built-in `file` and `log` probes do both: the watcher supplies
  * latency, the engine's scheduled `check()` supplies the safety net for
  * platforms where fs.watch is unreliable. Either way, evaluation happens
- * entirely inside the plugin — the model only creates monitors and blocks.
+ * entirely inside the plugin, and the model only creates monitors and blocks.
  */
 import { watch, type FSWatcher } from "node:fs";
 import { dirname } from "node:path";
@@ -41,8 +41,8 @@ export type ProbeFactory = (condition: unknown) => Probe;
 /**
  * Watch a path for changes by watching its parent directory, which also
  * catches creation and atomic-rename replacement. Returns undefined when the
- * parent does not exist yet — callers rely on their scheduled `check()` as
- * the backstop, so a missing watcher only costs latency, never correctness.
+ * parent does not exist yet. Callers rely on their scheduled `check()` as the
+ * backstop, so a missing watcher only costs latency, never correctness.
  */
 export function watchPath(path: string, onChange: () => void): FSWatcher | undefined {
   try {
@@ -75,7 +75,7 @@ export function clip(text: string, max = 400): string {
   // Slice before trimming: probe output can be tens of KB and only the tail
   // is kept, so trimming the whole string first would copy it for nothing.
   if (text.length <= max) return text.trim();
-  return `…${text.slice(text.length - max).trim()}`;
+  return `...${text.slice(text.length - max).trim()}`;
 }
 
 export function compileRegex(pattern: string): RegExp {

@@ -1,24 +1,39 @@
 /**
  * Probe registry: maps condition `type` strings to probe factories.
  *
- * Built-in types are registered at startup; additional types can be loaded
- * from `$CODEX_MONITOR_HOME/probes/*.mjs` (see loadCustomProbes), which is
- * what makes the monitor system programmable without forking the plugin.
+ * Built-in types register at startup. Additional types load from
+ * `<config home>/probes/*.mjs` (see loadCustomProbes), which is what makes
+ * the monitor system programmable without forking the plugin.
  */
 import { readdir } from "node:fs/promises";
+import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { Probe, ProbeFactory } from "./probes/probe.js";
 
 /**
- * Config home: $CODEX_MONITOR_HOME or ~/.codex-monitor. Holds only the
- * custom probes directory — there is no runtime state on disk.
+ * Config home. It holds only the custom probes directory; no runtime state
+ * ever lands on disk. Resolved in this order:
+ *
+ *   1. $CODEX_MONITOR_HOME
+ *   2. %APPDATA%\codex-monitor on Windows
+ *   3. $XDG_CONFIG_HOME/codex-monitor
+ *   4. ~/.config/codex-monitor
+ *
+ * XDG requires an absolute $XDG_CONFIG_HOME, so a relative one falls through
+ * to the default rather than resolving against the working directory.
  */
 export function defaultHome(): string {
-  return (
-    process.env.CODEX_MONITOR_HOME ??
-    join(process.env.HOME ?? process.env.USERPROFILE ?? ".", ".codex-monitor")
-  );
+  const explicit = process.env.CODEX_MONITOR_HOME;
+  if (explicit) return explicit;
+
+  if (process.platform === "win32" && process.env.APPDATA) {
+    return join(process.env.APPDATA, "codex-monitor");
+  }
+
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const configRoot = xdg && isAbsolute(xdg) ? xdg : join(homedir(), ".config");
+  return join(configRoot, "codex-monitor");
 }
 
 export class ProbeRegistry {
@@ -55,7 +70,7 @@ export async function loadCustomProbes(
   try {
     entries = await readdir(dir);
   } catch {
-    return; // no custom probes dir — fine
+    return; // no custom probes dir, nothing to load
   }
   // Imported concurrently (this is on the startup path, before the server
   // can answer anything) but registered in directory order, so which probe

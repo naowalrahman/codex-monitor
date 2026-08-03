@@ -1,5 +1,5 @@
 /**
- * `file` probe — filesystem conditions.
+ * `file` probe: filesystem conditions.
  *
  * fs.watch on the parent directory supplies low-latency wakeups; the
  * engine's scheduled `check()` is the safety net, because fs.watch is
@@ -37,8 +37,8 @@ function differs(a: Sig, b: Sig): boolean {
  * independent timer, so every event kind is a pure function of the current
  * signature and this probe keeps no timers of its own. Its schedule is
  * derived from `stable_seconds` because, unlike the other events, nothing
- * pushes a notification when a file *stops* changing — the check is the only
- * thing that can observe it.
+ * pushes a notification when a file stops changing. Only the check can
+ * observe it.
  */
 function pollFor(cond: FileCondition): Partial<PollPolicy> {
   if (cond.event !== "stable") return { interval_seconds: 2, max_interval_seconds: 30 };

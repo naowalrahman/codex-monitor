@@ -1,18 +1,18 @@
 /**
- * MonitorEngine — lifecycle, scheduling, and wait semantics.
+ * MonitorEngine: lifecycle, scheduling, and wait semantics.
  *
  * Responsibilities:
  *  - create/cancel monitors, entirely in memory
  *  - run each monitor's probe: subscribe event-driven probes, schedule
  *    polled probes with adaptive backoff + jitter (all inside this process)
  *  - settle monitors exactly once (satisfied / failed / timeout / cancelled)
- *  - `waitFor()`: a promise that resolves when a set of monitors settles —
- *    this is what backs the blocking `monitor_wait` MCP tool
+ *  - `waitFor()`, a promise that resolves when a set of monitors settles,
+ *    which is what backs the blocking `monitor_wait` MCP tool
  *
  * Monitors are deliberately session-scoped: they live and die with the MCP
- * server process (and therefore with the Codex session that spawned it).
- * There is no persistence and no cross-session state — closing Codex tears
- * every monitor down. This keeps concurrency trivial (any number of
+ * server process, and therefore with the Codex session that spawned it.
+ * Nothing persists and nothing is shared across sessions, so closing Codex
+ * tears every monitor down. That keeps concurrency trivial (any number of
  * sessions, zero shared state) at the cost of monitors not outliving their
  * session.
  */
@@ -125,7 +125,7 @@ export class MonitorEngine {
 
   /**
    * Resolve when the given monitors settle (mode 'all') or when the first
-   * one settles (mode 'any'). Never rejects on timeout — a wait timeout is a
+   * one settles (mode 'any'). Never rejects on timeout: a wait timeout is a
    * normal outcome and the monitors keep running.
    */
   waitFor(
@@ -134,8 +134,8 @@ export class MonitorEngine {
     opts: { timeoutMs: number; signal?: AbortSignal },
   ): Promise<WaitResult> {
     const snapshots = () => ids.map((id) => toSnapshot(this.getOrThrow(id)));
-    // Deduplicated for bookkeeping — a monitor listed twice must not be
-    // counted twice — while the result still mirrors the caller's list.
+    // Deduplicated for bookkeeping, so a monitor listed twice is not counted
+    // twice. The result still mirrors the caller's list.
     const targets = [...new Set(ids)].map((id) => this.getOrThrow(id).id);
 
     const settledCount = targets.filter((id) =>

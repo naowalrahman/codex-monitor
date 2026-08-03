@@ -1,10 +1,10 @@
 /**
  * Core types and schemas for the monitor engine.
  *
- * A Monitor is: a declarative *condition* + an evaluation policy + a lifecycle.
- * Conditions are validated with zod; the same schemas are exposed as the MCP
- * tool input schemas so the agent-facing contract and the engine contract
- * can never drift apart.
+ * A monitor is a declarative condition + an evaluation policy + a lifecycle.
+ * Zod validates conditions, and the same schemas serve as the MCP tool input
+ * schemas, so the agent-facing contract and the engine contract cannot drift
+ * apart.
  */
 import { z } from "zod";
 
@@ -105,8 +105,8 @@ export const BuiltinConditionSchema = z.discriminatedUnion("type", [
 
 /**
  * Conditions for custom probe types (loaded from the probes/ directory).
- * The shape is opaque to the engine — the probe factory owns validation and
- * defaults. Built-in type names are rejected here so a *malformed* built-in
+ * The shape is opaque to the engine, so the probe factory owns validation and
+ * defaults. Built-in type names are rejected here so a malformed built-in
  * condition fails validation loudly instead of sliding through as "custom".
  * Whether the type actually has a registered probe is checked at create time.
  */
@@ -132,8 +132,8 @@ export type Condition = z.infer<typeof ConditionSchema>;
  * Backoff policy for probed (non-event-driven) conditions. The engine starts
  * at `interval_seconds` and multiplies by `backoff_factor` after every
  * inconclusive check, capped at `max_interval_seconds`. A small jitter is
- * always applied. This lives entirely inside the plugin — the LLM never sees
- * or drives individual checks.
+ * always applied. This lives entirely inside the plugin, so the LLM never
+ * sees or drives individual checks.
  */
 export const PollPolicySchema = z.object({
   interval_seconds: z.number().min(0.05).max(3600).default(5),

@@ -1,5 +1,5 @@
 /**
- * Bundled custom probe: `tcp` — satisfied when a host:port accepts connections.
+ * Bundled custom probe: `tcp`, satisfied when a host:port accepts connections.
  *
  * Install: copy this file into `$(codex-monitor home)/probes/` and restart
  * Codex. Condition shape:

@@ -1,5 +1,5 @@
 /**
- * Bundled custom probe: `process` — satisfied when a PID exits.
+ * Bundled custom probe: `process`, satisfied when a PID exits.
  *
  * Install: copy this file into `$(codex-monitor home)/probes/` and restart
  * Codex. Condition shape:
@@ -7,10 +7,10 @@
  *   { "type": "process", "pid": 41527 }
  *
  * Uses signal 0 to test existence, so it works for processes the plugin did
- * not spawn — but for the same reason it cannot observe *exit codes* of
- * non-children. Pair with a `log` or `command` monitor when the outcome
- * matters, not just the exit. Note the EPERM edge case below: "not allowed
- * to signal it" still means "it exists".
+ * not spawn. For the same reason it cannot observe the exit code of a
+ * non-child. Pair with a `log` or `command` monitor when the outcome matters,
+ * not just the exit. Note the EPERM edge case below: "not allowed to signal
+ * it" still means "it exists".
  */
 export default {
   type: "process",

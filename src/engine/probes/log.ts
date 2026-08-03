@@ -1,5 +1,5 @@
 /**
- * `log` probe — tail a file and fire on a regex.
+ * `log` probe: tail a file and fire on a regex.
  *
  * Tracks a byte offset and only ever reads appended data, so it stays cheap
  * on large logs. Handles files that do not exist yet and files that get

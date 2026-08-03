@@ -1,10 +1,10 @@
 /**
- * `command` probe — the universal escape hatch.
+ * `command` probe: the universal escape hatch.
  *
  * Runs an arbitrary shell command per evaluation and applies declarative
  * predicates to its exit code and output. This is what makes the monitor
- * system command-agnostic: `squeue`, `docker inspect`, `kubectl get`,
- * `gh run view` — anything with a CLI can be monitored without the plugin
+ * system command-agnostic. `squeue`, `docker inspect`, `kubectl get`,
+ * `gh run view`, anything with a CLI can be monitored without the plugin
  * knowing about it.
  */
 import { spawn } from "node:child_process";

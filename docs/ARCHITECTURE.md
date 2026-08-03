@@ -1,19 +1,19 @@
 # Architecture
 
-`codex-monitor` implements one abstraction — **pause the agent until an arbitrary condition becomes true** — and everything in the design serves it. This document explains the moving parts and, more importantly, the reasoning behind them.
+`codex-monitor` implements one abstraction, pausing the agent until an arbitrary condition becomes true, and everything in the design serves it. This document explains the moving parts and the reasoning behind them.
 
 ## Why a blocking MCP tool call
 
-MCP has no mechanism for a server to call the model back later. Given that, there are only two ways an agent can wait for the world to change:
+MCP has no mechanism for a server to call the model back later. Given that, an agent can wait for the world to change in only two ways:
 
 1. The model polls: run a check, read the result, sleep, repeat. Every iteration costs tokens, pollutes the transcript, and puts scheduling logic (intervals, backoff, giving up) inside the LLM, where it is unreliable and unauditable.
 2. A tool call blocks until the condition settles.
 
-`monitor_wait` is option 2. The model makes one call and is genuinely suspended — no tokens, no turns — until the plugin has evidence. Clients cap tool-call duration, so three things make long blocks safe:
+`monitor_wait` is option 2. The model makes one call and is genuinely suspended, with no tokens and no turns, until the plugin has evidence. Clients cap tool-call duration, so three things make long blocks safe:
 
 - The server emits `notifications/progress` every 15s while blocked (when the client sends a progress token), for clients that use progress to reset timeouts.
 - Users set `tool_timeout_sec` generously for this server in `config.toml`.
-- A severed wait loses nothing. Monitors run independently of waiters, and a settled result stays readable in the engine, so re-issuing `monitor_wait` with the same ids *resumes* the pause. This is the recovery path for client timeouts and `wait_timeout_seconds` alike — and it is not a polling loop; it is at most one extra call per interruption.
+- A severed wait loses nothing. Monitors run independently of waiters, and a settled result stays readable in the engine, so re-issuing `monitor_wait` with the same ids resumes the pause. This is the recovery path for client timeouts and `wait_timeout_seconds` alike, and it is not a polling loop; it costs at most one extra call per interruption.
 
 ## Components
 
@@ -27,7 +27,7 @@ server.ts ────────────── tool surface: monitor_creat
 MonitorEngine ─────────── lifecycle, scheduling, wait semantics   (engine/engine.ts)
                │
                ├── ProbeRegistry ── built-ins: command, file, log (engine/probes/*)
-               │                    + custom probes from ~/.codex-monitor/probes/*.mjs
+               │                    + custom probes from <config home>/probes/*.mjs
                └── waiter index (monitor id ──► waiters) ──► waitFor() promises
 ```
 
@@ -35,64 +35,66 @@ The engine knows nothing about MCP; the server knows nothing about probes. Both 
 
 ## The monitor lifecycle
 
-A monitor is `spec` (condition + poll policy + timeout) plus `record` (state, attempts, evidence). `active` is the only non-terminal state; `settle()` moves a monitor to `satisfied`, `failed`, `timeout`, or `cancelled` exactly once, tears down its runtime (timers, watchers), and wakes any waiters registered on it. Settled records stay readable via `monitor_status` for the rest of the session.
+A monitor is `spec` (condition + poll policy + timeout) plus `record` (state, attempts, evidence). `active` is the only non-terminal state. `settle()` moves a monitor to `satisfied`, `failed`, `timeout`, or `cancelled` exactly once, tears down its runtime (timers, watchers), and wakes any waiters registered on it. Settled records stay readable via `monitor_status` for the rest of the session.
 
-`failed` is a first-class outcome, not an error: distinguishing "the job finished" from "the job crashed" at the *condition* level (`failure_when`, `failure_pattern`) means the agent wakes up already knowing which happened, with evidence attached, instead of waking on a generic change and re-investigating.
+`failed` is a first-class outcome, not an error. Distinguishing "the job finished" from "the job crashed" at the condition level (`failure_when`, `failure_pattern`) means the agent wakes up already knowing which happened, with evidence attached, instead of waking on a generic change and re-investigating.
 
 ## The evaluation model
 
 A probe exposes two capabilities, and may provide either or both:
 
-- **`check()`** — evaluate once. The engine schedules these at `interval · factor^n`, capped at `max_interval`, with ±10% jitter (so fifty monitors created together don't thundering-herd a login node). Probe errors — network blips, a `squeue` that fails once — are recorded as `pending`, never as failure; the monitor's own deadline is the backstop for a probe that errors forever.
-- **`start`/`stop`** — subscribe to a push source and emit outcomes as they arrive.
+- **`check()`** evaluates once. The engine schedules these at `interval · factor^n`, capped at `max_interval`, with ±10% jitter, so fifty monitors created together do not stampede a login node. Probe errors, such as a network blip or a `squeue` that fails once, are recorded as `pending`, never as failure; the monitor's own deadline is the backstop for a probe that errors forever.
+- **`start`/`stop`** subscribe to a push source and emit outcomes as they arrive.
 
-Crucially there is exactly **one** scheduler. `file` and `log` provide both capabilities over the same evaluation function: `fs.watch` supplies millisecond latency, and the engine's scheduled `check()` is the safety net, because `fs.watch` is best-effort on network mounts and misses atomic-rename writes on some platforms. Neither probe runs a poll loop of its own, so the `poll` policy is tunable per monitor for every condition type, and improving the scheduler improves all of them at once. Probes declare a `defaultPoll` when their condition implies a cadence — `file` with `event: "stable"` derives its interval from `stable_seconds`, because nothing pushes a notification when a file *stops* changing, so only the check can observe it.
+There is exactly **one** scheduler. `file` and `log` provide both capabilities over the same evaluation function: `fs.watch` supplies millisecond latency, and the engine's scheduled `check()` is the safety net, because `fs.watch` is best-effort on network mounts and misses atomic-rename writes on some platforms. Neither probe runs a poll loop of its own, so the `poll` policy is tunable per monitor for every condition type, and improving the scheduler improves all of them at once. Probes declare a `defaultPoll` when their condition implies a cadence. `file` with `event: "stable"` derives its interval from `stable_seconds`, because nothing pushes a notification when a file stops changing, so only the check can observe it.
 
 Concurrent evaluations are coalesced onto one in-flight promise (a watcher typically fires several times per write, and a scheduled check can land on top of that), so bursty sources cost one stat/read pass rather than many.
 
-Either way, evaluation lives entirely in the plugin process. The model's only verbs are *create*, *wait*, *status*, *cancel*.
+Either way, evaluation lives entirely in the plugin process. The model's only verbs are create, wait, status, and cancel.
 
 ### Why exactly three built-in condition types
 
-Any condition checkable by running a program and inspecting the result is a `command` condition — one stateless sample per evaluation. That single type is what makes the system command-agnostic: Slurm, Docker, Kubernetes, `gh run`, anything.
+Any condition checkable by running a program and inspecting the result is a `command` condition, one stateless sample per evaluation. That single type is what makes the system command-agnostic: Slurm, Docker, Kubernetes, `gh run`, anything.
 
 `file` and `log` are built in because sampling cannot express them:
 
-- They hold **state across evaluations**. The log probe tracks a byte offset so it matches only *newly appended* content (and survives truncation/rotation); `grep DONE file` as a command condition would fire on stale content from a previous run. `file event=changed` needs a baseline captured at monitor start; `event=stable` needs a debounce timer spanning observations. In a command-only design that state would have to live in the model's context — the exact failure mode this plugin removes.
+- They hold **state across evaluations**. The log probe tracks a byte offset so it matches only newly appended content, and it survives truncation and rotation; `grep DONE file` as a command condition would fire on stale content from a previous run. `file event=changed` needs a baseline captured at monitor start, and `event=stable` needs a debounce timer spanning observations. In a command-only design that state would live in the model's context, the exact failure mode this plugin removes.
 - They are **event-driven**, reacting in milliseconds rather than on a poll boundary.
 
-Everything else (HTTP, PID exit, TCP, …) is stateless sampling and therefore lives outside the core, as `command` conditions or custom probes (`examples/probes/` ships ready-made ones). This keeps the core's contract crisp: a new built-in type must demonstrate semantics that sampling can't express.
+Everything else (HTTP, PID exit, TCP) is stateless sampling and therefore lives outside the core, as `command` conditions or custom probes (`examples/probes/` ships ready-made ones). This keeps the core's contract crisp: a new built-in type must demonstrate semantics that sampling cannot express.
 
-## Lifetime & scope: session-scoped on purpose
+## Lifetime and scope: session-scoped on purpose
 
 Monitors are held entirely in the server process's memory and die with it. Codex spawns one server per session, so a monitor's lifetime is exactly its session's lifetime. This is a deliberate design decision, not a missing feature:
 
-- **Concurrency becomes a non-problem.** Any number of Codex sessions run side by side with zero shared state — no lock files, no state-file ownership races, no risk of two engines evaluating (and side-effecting) the same monitor.
-- **The mental model is exact.** `monitor_status` shows everything that exists; when the session ends, nothing lingers to wonder about, leak, or clean up.
-- **The durable thing is the job, not the watcher.** A Slurm job, container, or CI run survives your session on its own; a monitor is cheap to recreate from its declarative condition in the next session. Persisting watchers would buy little and cost a shared-state protocol (locks or a daemon) to do safely.
+- **Concurrency becomes a non-problem.** Any number of Codex sessions run side by side with zero shared state: no lock files, no state-file ownership races, no risk of two engines evaluating (and side-effecting) the same monitor.
+- **The mental model is exact.** `monitor_status` shows everything that exists, and when the session ends nothing lingers to wonder about, leak, or clean up.
+- **The durable thing is the job, not the watcher.** A Slurm job, container, or CI run survives your session on its own, and a monitor is cheap to recreate from its declarative condition in the next session. Persisting watchers would buy little and cost a shared-state protocol (locks or a daemon) to do safely.
 
-Consequently `~/.codex-monitor/` holds only configuration (the custom probes directory) — no runtime state. If evaluation must continue with no session open at all, that is a job for a real scheduler (cron, systemd), not this plugin.
+Consequently the config directory holds only configuration, the custom probes directory, and no runtime state. If evaluation must continue with no session open at all, that is a job for a real scheduler such as cron or systemd, not this plugin.
 
 ## Wait semantics
 
 `waitFor(ids, mode, timeout)` resolves when the id set settles (`all`) or when the first member settles (`any`), returning snapshots of every requested monitor with its evidence. Design points:
 
 - A wait timeout is a **normal outcome**, not an error, and it does not disturb the monitors.
-- Waiters are pure observers, indexed by the monitor ids they care about — any number of waits, over overlapping sets, concurrently. Settling a monitor notifies only the waiters registered on *that* monitor, so the cost does not grow with the number of unrelated waits in flight.
-- `mode: "any"` over several monitors is the composition primitive ("wake me when the job finishes *or* the error log matches"), which is why boolean condition algebra hasn't been needed in the core.
-- The MCP request's abort signal cancels the wait (not the monitors).
+- Waiters are pure observers, indexed by the monitor ids they care about, so any number of waits over overlapping sets can run concurrently. Settling a monitor notifies only the waiters registered on that monitor, so the cost does not grow with the number of unrelated waits in flight.
+- `mode: "any"` over several monitors is the composition primitive ("wake me when the job finishes or the error log matches"), which is why boolean condition algebra has not been needed in the core.
+- The MCP request's abort signal cancels the wait, not the monitors.
 
 ## Extensibility
 
-A probe factory takes a validated condition object and returns `{ check?, start?, stop?, defaultPoll? }`. Built-ins register in `builtinRegistry()`; user probes are ES modules in `~/.codex-monitor/probes/` default-exporting `{ type, create }`, loaded at startup. Event-driven probes receive a host with `emit`; state that spans evaluations (a log tail's byte offset, a baseline file signature) lives in the probe's closure, which is safe precisely because probes never outlive their process.
+A probe factory takes a validated condition object and returns `{ check?, start?, stop?, defaultPoll? }`. Built-ins register in `builtinRegistry()`. User probes are ES modules in the config directory's `probes/` folder, default-exporting `{ type, create }`, loaded at startup. That directory resolves in this order: `$CODEX_MONITOR_HOME`, then `%APPDATA%\codex-monitor` on Windows, then `$XDG_CONFIG_HOME/codex-monitor`, then `~/.config/codex-monitor`.
 
-Condition validation is deliberately two-tier: built-in condition schemas are closed and strict (a malformed `command` condition fails loudly — it cannot slide through as "custom", because the custom schema rejects built-in type names), while custom conditions pass through with their fields untouched and the probe factory owns validation and defaults. Unknown types are rejected at create time, before the monitor is registered.
+Event-driven probes receive a host with `emit`. State that spans evaluations, such as a log tail's byte offset or a baseline file signature, lives in the probe's closure, which is safe precisely because probes never outlive their process.
+
+Condition validation is deliberately two-tier. Built-in condition schemas are closed and strict, so a malformed `command` condition fails loudly and cannot slide through as "custom", because the custom schema rejects built-in type names. Custom conditions pass through with their fields untouched and the probe factory owns validation and defaults. Unknown types are rejected at create time, before the monitor is registered.
 
 ## Failure modes, honestly
 
-| Scenario | Behavior |
-|---|---|
-| Session ends / server killed | Every monitor in that session dies with the process — by design. The underlying job is unaffected; recreate the monitor in the next session if you still care about it. |
-| Probe command errors repeatedly | Stays `pending` with the error as evidence; monitor `timeout` is the backstop. |
-| Client times the blocked call out | Nothing lost within the session; resume with `monitor_wait` on the same ids. Configure `tool_timeout_sec` to make this rare. |
-| Many concurrent sessions | Fully independent server processes with no shared state; nothing to coordinate. |
+| Scenario                          | Behavior                                                                                                                                                             |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Session ends / server killed      | Every monitor in that session dies with the process, by design. The underlying job is unaffected; recreate the monitor in the next session if you still care about it. |
+| Probe command errors repeatedly   | Stays `pending` with the error as evidence; monitor `timeout` is the backstop.                                                                                       |
+| Client times the blocked call out | Nothing lost within the session; resume with `monitor_wait` on the same ids. Configure `tool_timeout_sec` to make this rare.                                          |
+| Many concurrent sessions          | Fully independent server processes with no shared state; nothing to coordinate.                                                                                      |

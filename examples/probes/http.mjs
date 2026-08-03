@@ -1,5 +1,5 @@
 /**
- * Bundled custom probe: `http` — endpoint readiness.
+ * Bundled custom probe: `http`, endpoint readiness.
  *
  * Install: copy this file into `$(codex-monitor home)/probes/` and restart
  * Codex. Then create monitors with conditions like:
@@ -10,11 +10,11 @@
  *     "body_matches": "\"ready\": ?true",  // optional regex
  *     "request_timeout_seconds": 10 }  // optional
  *
- * This lives outside the core because it is pure *sampling* — it keeps no
- * state between checks — so it is fully expressible as a `command` condition
- * over curl. It exists as a probe for environments without curl and to keep
- * the predicates declarative. Custom probes own their condition's validation
- * and defaults; the engine passes the condition object through untouched.
+ * This lives outside the core because it is pure sampling. It keeps no state
+ * between checks, so it is fully expressible as a `command` condition over
+ * curl. It exists as a probe for environments without curl and to keep the
+ * predicates declarative. Custom probes own their condition's validation and
+ * defaults; the engine passes the condition object through untouched.
  */
 const MAX_BODY = 256 * 1024;
 

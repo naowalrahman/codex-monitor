@@ -34,7 +34,7 @@ function creationView(record: MonitorRecord) {
     monitor: toSnapshot(record),
     hint:
       record.state === "active"
-        ? "Monitor is running in the background. Call monitor_wait with this id to pause until it settles. Do NOT poll with sleep loops."
+        ? "Monitor is running in the background. Call monitor_wait with this id to pause until it settles. Do NOT poll with sleep loops. A wait that ends without a settled result, whether interrupted or timed out, does not stop the monitor. Call monitor_wait again with this id to resume."
         : "Monitor already settled on its first evaluation.",
   };
 }
@@ -101,7 +101,7 @@ export async function runServer(home = defaultHome()): Promise<void> {
       title: "Create monitor",
       description:
         "Create a background monitor that watches for a condition and settles when it becomes " +
-        "true. Evaluation happens inside the plugin — never write your own sleep/poll loop. " +
+        "true. Evaluation happens inside the plugin, so never write your own sleep/poll loop. " +
         "Returns a monitor id; pass it to monitor_wait to pause until the condition holds. Use " +
         "this for anything long-running: cluster jobs, builds, deploys, downloads, servers " +
         `coming up. Installed condition types: ${registry.types().join(", ")}.`,
@@ -117,8 +117,9 @@ export async function runServer(home = defaultHome()): Promise<void> {
       description:
         "Block until the given monitor(s) settle (satisfied, failed, timeout, or cancelled). " +
         "mode 'all' waits for every listed monitor; 'any' returns as soon as one settles. " +
-        "If wait_timeout_seconds elapses first, returns outcome 'wait_timeout' — the monitors " +
-        "keep running and you can call monitor_wait again with the same ids.",
+        "If wait_timeout_seconds elapses first, returns outcome 'wait_timeout'. Monitors keep " +
+        "running whenever a wait ends early, including when the call is interrupted, so call " +
+        "monitor_wait again with the same ids to resume.",
       inputSchema: {
         ids: z.array(z.string()).nonempty().describe("Monitor ids returned by monitor_create."),
         mode: z.enum(["all", "any"]).default("all"),
