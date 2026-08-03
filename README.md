@@ -27,7 +27,7 @@ Then register it in `~/.codex/config.toml`:
 [mcp_servers.monitor]
 command = "codex-monitor"
 # monitor_wait blocks on purpose. Give the tool call room to block.
-tool_timeout_sec = 7200
+tool_timeout_sec = 86400
 startup_timeout_sec = 20
 ```
 
@@ -65,7 +65,7 @@ The agent sees five tools:
 | Tool             | Behavior                                                                                                                     |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `monitor_create` | Register a condition; returns a monitor id immediately.                                                                      |
-| `monitor_wait`   | **Blocks** until the listed monitors settle (`mode: all\|any`). A `wait_timeout` returns control; the monitors keep running.  |
+| `monitor_wait`   | **Blocks** until the listed monitors settle (`mode: all\|any`). A `wait_timeout` returns control; the monitors keep running. |
 | `monitor_run`    | `create` + `wait` in one call, for the common case.                                                                          |
 | `monitor_status` | Non-blocking snapshot (for a quick look, not for polling).                                                                   |
 | `monitor_cancel` | Settle an active monitor as `cancelled`.                                                                                     |
