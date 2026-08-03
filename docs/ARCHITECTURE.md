@@ -21,7 +21,7 @@ MCP has no mechanism for a server to call the model back later. Given that, an a
 Codex CLI (MCP client, stdio)
    │
    ▼
-server.ts ────────────── tool surface: monitor_create / _wait / _run / _status / _cancel
+server.ts ────────────── tool surface: monitor_create / _wait / _status / _cancel
    │                     schemas shared with the engine (src/engine/types.ts)
    ▼
 MonitorEngine ─────────── lifecycle, scheduling, wait semantics   (engine/engine.ts)
@@ -31,7 +31,11 @@ MonitorEngine ─────────── lifecycle, scheduling, wait sema
                └── waiter index (monitor id ──► waiters) ──► waitFor() promises
 ```
 
-The engine knows nothing about MCP; the server knows nothing about probes. Both are independently testable (the test suite drives the engine directly), and the engine could be embedded in another host without change.
+The engine knows nothing about MCP; the server knows nothing about probes. Both are independently testable (the suite drives the engine directly and the tool surface through an in-memory MCP client), and the engine could be embedded in another host without change.
+
+### Why four tools and not five
+
+The tool schemas are re-sent to the model on every request, and MCP has no way to share a schema between two tools. A dedicated create-and-wait tool would therefore have to repeat the entire condition union, roughly 2.8kB of JSON Schema, to save one round trip. `monitor_create` takes an optional `wait_timeout_seconds` instead: omit it and you get an id back immediately, set it and the call blocks. That is the same capability for none of the duplication, and it took the whole surface from ~10.2kB to ~6.3kB. A test asserts the ceiling so it cannot drift back up, and for the same reason results are compact JSON with hints only where they change what the model does next.
 
 ## The monitor lifecycle
 

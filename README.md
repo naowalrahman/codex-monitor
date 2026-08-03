@@ -62,15 +62,18 @@ active ─┤  satisfied   the condition became true                           �
         └──────────────────────────────────────────────────────────────────┘
 ```
 
-The agent sees five tools:
+The agent sees four tools:
 
 | Tool             | Behavior                                                                                                                     |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `monitor_create` | Register a condition; returns a monitor id immediately.                                                                      |
+| `monitor_create` | Register a condition. Returns a monitor id immediately, or **blocks** until it settles when `wait_timeout_seconds` is set.   |
 | `monitor_wait`   | **Blocks** until the listed monitors settle (`mode: all\|any`). A `wait_timeout` returns control; the monitors keep running. |
-| `monitor_run`    | `create` + `wait` in one call, for the common case.                                                                          |
 | `monitor_status` | Non-blocking snapshot (for a quick look, not for polling).                                                                   |
 | `monitor_cancel` | Settle an active monitor as `cancelled`.                                                                                     |
+
+Every tool returns the same `{ monitors, outcome?, hint? }` shape as compact JSON.
+
+The surface is four tools rather than five on purpose. MCP re-sends every tool schema to the model on each request and cannot share schemas between tools, so a separate create-and-wait tool would repeat the entire condition union, about 2.8kB of JSON Schema, for one saved round trip. Folding it into `monitor_create` as a flag cut the surface from ~10.2kB to ~6.3kB. [test/server.test.ts](test/server.test.ts) holds that budget.
 
 ## Condition types
 
